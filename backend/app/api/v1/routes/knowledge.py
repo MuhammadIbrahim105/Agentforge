@@ -169,3 +169,81 @@ def search_knowledge(
         n_results=payload.n_results
     )
     return result
+
+@router.post("/{project_id}/analyze-image")
+async def analyze_image_endpoint(
+    project_id: str,
+    question: str = "Describe this image in detail. Extract ALL text, numbers, data, and information visible.",
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    from app.agents.vision_agent import analyze_image
+    from app.rag.chunker import chunk_text
+    from app.rag.retriever import add_chunks_to_collection
+
+    project = db.query(Project).filter(
+        Project.id == project_id,
+        Project.owner_id == current_user.id
+    ).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    ext = file.filename.split(".")[-1].lower()
+    if ext not in ["jpg", "jpeg", "png", "gif", "webp"]:
+        raise HTTPException(status_code=400, detail="Unsupported image type")
+
+    image_id = str(uuid.uuid4())
+    image_path = f"{UPLOAD_DIR}/{image_id}_{file.filename}"
+
+    contents = await file.read()
+    with open(image_path, "wb") as f:
+        f.write(contents)
+
+    try:
+        result = analyze_image(image_path=image_path, question=question)
+
+        extracted_text = f"""IMAGE ANALYSIS: {file.filename}
+
+{result['answer']}
+
+Confidence Score: {result['confidence_score']}%
+Source: {file.filename} (image)"""
+
+        doc_id = str(uuid.uuid4())
+        chunks = chunk_text(extracted_text, f"[IMAGE] {file.filename}")
+        count = add_chunks_to_collection(
+            project.chroma_collection,
+            chunks,
+            doc_id
+        )
+
+        doc = Document(
+            id=doc_id,
+            project_id=project_id,
+            user_id=current_user.id,
+            filename=f"[IMAGE] {file.filename}",
+            file_type=DocumentType("txt"),
+            file_size=len(contents),
+            local_path=image_path,
+            status=DocumentStatus.completed,
+            chunk_count=count,
+            embedding_count=count
+        )
+        db.add(doc)
+        db.commit()
+
+        return {
+            "answer": result["answer"],
+            "tokens_used": result["tokens_used"],
+            "model": result["model"],
+            "filename": file.filename,
+            "confidence_score": result["confidence_score"],
+            "stored_in_knowledge_base": True,
+            "chunks_created": count,
+            "message": "Image analyzed and stored in knowledge base. You can now ask questions about it using the Agent Runner or Knowledge Search."
+        }
+    except Exception as e:
+        if os.path.exists(image_path):
+            os.remove(image_path)
+        raise HTTPException(status_code=500, detail=str(e))
