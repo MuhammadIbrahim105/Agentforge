@@ -170,6 +170,7 @@ def search_knowledge(
     )
     return result
 
+
 @router.post("/{project_id}/analyze-image")
 async def analyze_image_endpoint(
     project_id: str,
@@ -240,8 +241,7 @@ Source: {file.filename} (image)"""
             "filename": file.filename,
             "confidence_score": result["confidence_score"],
             "stored_in_knowledge_base": True,
-            "chunks_created": count,
-            "message": "Image analyzed and stored in knowledge base. You can now ask questions about it using the Agent Runner or Knowledge Search."
+            "chunks_created": count
         }
     except Exception as e:
         if os.path.exists(image_path):

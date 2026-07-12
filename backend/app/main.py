@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.database import engine, Base
-from app.api.v1.routes import auth, projects, knowledge, agents, analytics, websocket
+from app.api.v1.routes import auth, projects, knowledge, agents, analytics, websocket, search
 
 Base.metadata.create_all(bind=engine)
 
@@ -27,6 +27,7 @@ app.include_router(knowledge.router, prefix="/api/v1/knowledge", tags=["Knowledg
 app.include_router(agents.router, prefix="/api/v1/agents", tags=["Agents"])
 app.include_router(analytics.router, prefix="/api/v1/analytics", tags=["Analytics"])
 app.include_router(websocket.router, tags=["WebSocket"])
+app.include_router(search.router, prefix="/api/v1/search", tags=["Search"])
 
 
 @app.get("/")

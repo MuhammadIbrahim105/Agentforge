@@ -15,6 +15,7 @@ class Settings(BaseSettings):
 
     GROQ_API_KEY: Optional[str] = None
     OPENAI_API_KEY: Optional[str] = None
+    TAVILY_API_KEY: Optional[str] = None
 
     LANGCHAIN_TRACING_V2: bool = True
     LANGCHAIN_API_KEY: Optional[str] = None
