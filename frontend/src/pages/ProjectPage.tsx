@@ -10,15 +10,16 @@ import client from '../api/client'
 
 interface Message {
     id: string
-    role: 'user' | 'assistant'
+    role: 'user' | 'assistant' | 'divider'
     content: string
     sources?: string[]
     webSources?: string[]
     agents?: string[]
     tokens?: number
     confidence?: number
-    type?: 'text' | 'image'
+    type?: 'text' | 'image' | 'context-change'
     mode?: string
+    contextLabel?: string
 }
 
 export default function ProjectPage() {
@@ -33,6 +34,7 @@ export default function ProjectPage() {
     const [showImageInput, setShowImageInput] = useState(false)
     const [selectedDocs, setSelectedDocs] = useState<string[]>([])
     const [searchMode, setSearchMode] = useState<'docs' | 'web' | 'hybrid'>('docs')
+    const [lastContext, setLastContext] = useState<string>('all')
     const fileRef = useRef<HTMLInputElement>(null)
     const imageRef = useRef<HTMLInputElement>(null)
     const bottomRef = useRef<HTMLDivElement>(null)
@@ -51,10 +53,58 @@ export default function ProjectPage() {
         bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
     }, [messages])
 
+    const getContextKey = () => {
+        if (searchMode === 'web') return 'web'
+        if (selectedDocs.length === 0) return `all-${searchMode}`
+        return `${selectedDocs.sort().join(',')}-${searchMode}`
+    }
+
+    const getContextLabel = () => {
+        if (searchMode === 'web') return '🌐 Web search only'
+        if (searchMode === 'hybrid' && selectedDocs.length === 0) return '🔀 All documents + Web'
+        if (searchMode === 'hybrid') return `🔀 ${getSelectedDocNames()} + Web`
+        if (selectedDocs.length === 0) return '📄 All documents'
+        return `📄 ${getSelectedDocNames()}`
+    }
+
+    const addContextDivider = (newLabel: string) => {
+        setMessages(prev => [...prev, {
+            id: `divider-${Date.now()}`,
+            role: 'divider',
+            content: '',
+            type: 'context-change',
+            contextLabel: newLabel
+        }])
+    }
+
     const toggleDocSelection = (docId: string) => {
-        setSelectedDocs(prev =>
-            prev.includes(docId) ? prev.filter(d => d !== docId) : [...prev, docId]
-        )
+        const newSelected = selectedDocs.includes(docId)
+            ? selectedDocs.filter(d => d !== docId)
+            : [...selectedDocs, docId]
+
+        setSelectedDocs(newSelected)
+
+        const newLabel = newSelected.length === 0
+            ? `📄 All documents`
+            : `📄 ${newSelected.map(sid => completedDocs.find((d: any) => d.id === sid)?.filename?.replace('[IMAGE] ', '') || sid).join(', ')}`
+
+        const newKey = newSelected.sort().join(',') || 'all'
+        if (newKey !== lastContext.split('-')[0] && messages.length > 0) {
+            addContextDivider(newLabel)
+            setLastContext(newKey)
+        }
+    }
+
+    const handleModeChange = (newMode: 'docs' | 'web' | 'hybrid') => {
+        if (newMode === searchMode) return
+        setSearchMode(newMode)
+
+        if (messages.length > 0) {
+            const label = newMode === 'web' ? '🌐 Web search only' :
+                newMode === 'hybrid' ? '🔀 Documents + Web' :
+                    '📄 Documents only'
+            addContextDivider(label)
+        }
     }
 
     const getSelectedDocNames = () => {
@@ -72,47 +122,44 @@ export default function ProjectPage() {
         return `${query}\n\n[IMPORTANT: Only use information from these specific sources: ${selectedNames.join(', ')}. Ignore all other documents.]`
     }
 
-    const autoSummarize = async (filename: string) => {
-        setLoading(true)
-        try {
-            const result = await smartSearch(
-                id!,
-                `Provide a comprehensive summary of "${filename}". What are the main topics, key points, and important information it contains?`,
-                'docs'
-            )
-            setMessages(prev => [...prev, {
-                id: (Date.now() + 1).toString(),
-                role: 'assistant',
-                content: `📄 **${filename}** uploaded!\n\n**Here's what's inside:**\n\n${result?.answer || 'Document processed. You can now ask questions about it.'}`,
-                sources: result?.doc_sources,
-                tokens: result?.tokens_used,
-                agents: ['ResearchAgent'],
-                mode: 'docs'
-            }])
-        } catch {
-            setMessages(prev => [...prev, {
-                id: (Date.now() + 1).toString(),
-                role: 'assistant',
-                content: `✅ **${filename}** uploaded and ready. Ask me anything about it.`
-            }])
-        } finally {
-            setLoading(false)
-        }
-    }
-
     const handleDocUpload = async (file: File) => {
         setUploading(true)
         try {
             const doc = await uploadDocument(id!, file)
             await processDocument(id!, doc.id)
             queryClient.invalidateQueries({ queryKey: ['documents', id] })
-            await autoSummarize(file.name)
+
+            setLoading(true)
+            try {
+                const result = await smartSearch(
+                    id!,
+                    `Provide a brief summary of "${file.name}". What are the main topics and key points?`,
+                    'docs'
+                )
+                setMessages(prev => [...prev, {
+                    id: (Date.now() + 1).toString(),
+                    role: 'assistant',
+                    content: `📄 **${file.name}** is ready.\n\n${result?.answer || 'You can now ask questions about this document.'}`,
+                    sources: result?.doc_sources,
+                    tokens: result?.tokens_used,
+                    agents: ['ResearchAgent'],
+                    mode: 'docs'
+                }])
+            } catch {
+                setMessages(prev => [...prev, {
+                    id: (Date.now() + 1).toString(),
+                    role: 'assistant',
+                    content: `📄 **${file.name}** uploaded and ready. Ask me anything about it.`
+                }])
+            } finally {
+                setLoading(false)
+            }
         } catch (err) {
             console.error(err)
             setMessages(prev => [...prev, {
                 id: Date.now().toString(),
                 role: 'assistant',
-                content: 'Failed to upload document. Please try again.'
+                content: `Failed to upload document. Please try again.`
             }])
         } finally {
             setUploading(false)
@@ -141,7 +188,7 @@ export default function ProjectPage() {
             setMessages(prev => [...prev, {
                 id: (Date.now() + 1).toString(),
                 role: 'assistant',
-                content: `🖼️ **${file.name}** analyzed!\n\n**Here's what I found:**\n\n${res.data.answer}\n\n*Image stored in knowledge base — ask follow-up questions anytime.*`,
+                content: `🖼️ **${file.name}** analyzed and stored in knowledge base.\n\n${res.data.answer}\n\n*You can now ask follow-up questions about this image.*`,
                 confidence: res.data.confidence_score,
                 tokens: res.data.tokens_used,
                 type: 'image'
@@ -159,6 +206,14 @@ export default function ProjectPage() {
 
     const handleSend = async () => {
         if (!input.trim() || loading) return
+
+        // Check if context changed since last message
+        const currentContextKey = getContextKey()
+        if (messages.length > 0 && currentContextKey !== lastContext) {
+            addContextDivider(getContextLabel())
+            setLastContext(currentContextKey)
+        }
+
         const userMessage: Message = {
             id: Date.now().toString(),
             role: 'user',
@@ -186,6 +241,10 @@ export default function ProjectPage() {
                         ['ResearchAgent', 'WebAgent'],
                 mode: result.mode
             }])
+
+            if (messages.length === 0) {
+                setLastContext(currentContextKey)
+            }
         } catch (err: any) {
             setMessages(prev => [...prev, {
                 id: (Date.now() + 1).toString(),
@@ -220,7 +279,6 @@ export default function ProjectPage() {
             {/* Left panel */}
             <div className="ml-64 w-72 flex flex-col border-r" style={{ borderColor: 'rgba(99,102,241,0.1)', background: '#0A0A0F' }}>
 
-                {/* Header */}
                 <div className="p-4 border-b" style={{ borderColor: 'rgba(99,102,241,0.1)' }}>
                     <button onClick={() => navigate('/dashboard')}
                         className="flex items-center gap-2 text-gray-500 hover:text-white text-sm mb-3 transition-all">
@@ -285,7 +343,10 @@ export default function ProjectPage() {
                             Sources ({completedDocs.length})
                         </p>
                         {selectedDocs.length > 0 && (
-                            <button onClick={() => setSelectedDocs([])}
+                            <button onClick={() => {
+                                setSelectedDocs([])
+                                if (messages.length > 0) addContextDivider('📄 All documents')
+                            }}
                                 className="text-xs text-indigo-400 hover:text-indigo-300">
                                 Clear
                             </button>
@@ -295,7 +356,15 @@ export default function ProjectPage() {
                     {selectedDocs.length > 0 && (
                         <div className="mb-3 p-2 rounded-lg text-xs text-indigo-300"
                             style={{ background: 'rgba(99,102,241,0.08)', border: '1px solid rgba(99,102,241,0.15)' }}>
-                            🎯 Filtering to {selectedDocs.length} source{selectedDocs.length > 1 ? 's' : ''}
+                            🎯 {selectedDocs.length} source{selectedDocs.length > 1 ? 's' : ''} selected
+                        </div>
+                    )}
+
+                    {uploading && (
+                        <div className="mb-3 p-2 rounded-lg text-xs text-emerald-300 flex items-center gap-2"
+                            style={{ background: 'rgba(16,185,129,0.08)', border: '1px solid rgba(16,185,129,0.2)' }}>
+                            <Loader size={10} className="animate-spin" />
+                            Processing document...
                         </div>
                     )}
 
@@ -356,21 +425,29 @@ export default function ProjectPage() {
             <div className="flex-1 flex flex-col">
 
                 {/* Chat header */}
-                <div className="px-6 py-4 border-b flex items-center gap-3"
+                <div className="px-6 py-4 border-b flex items-center justify-between"
                     style={{ borderColor: 'rgba(99,102,241,0.1)', background: '#0A0A0F' }}>
-                    <div className="w-7 h-7 rounded-lg flex items-center justify-center"
-                        style={{ background: 'rgba(99,102,241,0.15)' }}>
-                        <Brain size={14} className="text-indigo-400" />
+                    <div className="flex items-center gap-3">
+                        <div className="w-7 h-7 rounded-lg flex items-center justify-center"
+                            style={{ background: 'rgba(99,102,241,0.15)' }}>
+                            <Brain size={14} className="text-indigo-400" />
+                        </div>
+                        <div>
+                            <p className="text-white text-sm font-semibold">AI Assistant</p>
+                            <p className="text-gray-600 text-xs">{getContextLabel()}</p>
+                        </div>
                     </div>
-                    <div>
-                        <p className="text-white text-sm font-semibold">AI Assistant</p>
-                        <p className="text-gray-600 text-xs">
-                            {searchMode === 'docs' ? '📄 Searching private documents only' :
-                                searchMode === 'web' ? '🌐 Searching the internet only' :
-                                    '🔀 Searching documents + internet'}
-                            {selectedDocs.length > 0 && ` · ${selectedDocs.length} source filter active`}
-                        </p>
-                    </div>
+                    {messages.length > 0 && (
+                        <button
+                            onClick={() => {
+                                setMessages([])
+                                setLastContext('all')
+                            }}
+                            className="text-xs text-gray-600 hover:text-gray-400 px-3 py-1.5 rounded-lg transition-all"
+                            style={{ border: '1px solid rgba(255,255,255,0.06)' }}>
+                            Clear chat
+                        </button>
+                    )}
                 </div>
 
                 {/* Messages */}
@@ -383,12 +460,12 @@ export default function ProjectPage() {
                             </div>
                             <h3 className="text-white font-semibold mb-2">Start a conversation</h3>
                             <p className="text-gray-600 text-sm max-w-sm">
-                                Upload a document or image on the left — I'll automatically summarize it. Then ask questions using any search mode.
+                                Upload documents on the left, select which ones to search, choose a mode, then ask questions.
                             </p>
                             <div className="mt-6 space-y-2 w-full max-w-sm">
                                 {[
-                                    'What are the key points in my documents?',
-                                    'Summarize everything you know',
+                                    'Summarize all my documents',
+                                    'What are the key points?',
                                     'What are the latest AI trends? (use Web mode)'
                                 ].map((suggestion) => (
                                     <button key={suggestion} onClick={() => setInput(suggestion)}
@@ -401,95 +478,111 @@ export default function ProjectPage() {
                         </div>
                     )}
 
-                    {messages.map((msg) => (
-                        <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                            <div className="max-w-xl w-full">
-                                {msg.role === 'assistant' && (
-                                    <div className="flex items-center gap-2 mb-2">
-                                        <div className="w-5 h-5 rounded-md flex items-center justify-center"
-                                            style={{ background: 'rgba(99,102,241,0.2)' }}>
-                                            <Brain size={10} className="text-indigo-400" />
-                                        </div>
-                                        <span className="text-gray-600 text-xs">AgentForge</span>
-                                        {msg.confidence && (
-                                            <span className="text-xs px-2 py-0.5 rounded-full font-medium"
-                                                style={{
-                                                    background: msg.confidence >= 90 ? 'rgba(16,185,129,0.1)' : 'rgba(245,158,11,0.1)',
-                                                    color: msg.confidence >= 90 ? '#10B981' : '#F59E0B'
-                                                }}>
-                                                {msg.confidence}% confident
-                                            </span>
-                                        )}
-                                        {msg.mode && (
-                                            <span className="text-xs px-2 py-0.5 rounded-full"
-                                                style={{
-                                                    background: msg.mode === 'web' ? 'rgba(16,185,129,0.08)' :
-                                                        msg.mode === 'hybrid' ? 'rgba(245,158,11,0.08)' :
-                                                            'rgba(99,102,241,0.08)',
-                                                    color: msg.mode === 'web' ? '#10B981' :
-                                                        msg.mode === 'hybrid' ? '#F59E0B' : '#818CF8'
-                                                }}>
-                                                {msg.mode === 'web' ? '🌐 web' : msg.mode === 'hybrid' ? '🔀 hybrid' : '📄 docs'}
-                                            </span>
-                                        )}
-                                    </div>
-                                )}
-
-                                {msg.role === 'user' && msg.sources && (
-                                    <div className="flex justify-end mb-1">
-                                        <span className="text-xs text-indigo-400 px-2 py-0.5 rounded-full"
-                                            style={{ background: 'rgba(99,102,241,0.1)' }}>
-                                            🎯 {msg.sources.join(', ')}
-                                        </span>
-                                    </div>
-                                )}
-
-                                <div className={`px-4 py-3 rounded-2xl text-sm leading-relaxed ${msg.role === 'user' ? 'ml-auto rounded-tr-sm' : 'rounded-tl-sm'}`}
-                                    style={msg.role === 'user' ? {
-                                        background: 'linear-gradient(135deg, #6366F1, #8B5CF6)',
-                                        color: 'white',
-                                        maxWidth: 'fit-content'
-                                    } : {
-                                        background: '#0F0F1A',
-                                        border: '1px solid rgba(99,102,241,0.15)',
-                                        color: '#E2E8F0'
-                                    }}>
-                                    <div className="space-y-0.5">
-                                        {renderMessageContent(msg.content)}
-                                    </div>
+                    {messages.map((msg) => {
+                        // Context divider
+                        if (msg.role === 'divider') {
+                            return (
+                                <div key={msg.id} className="flex items-center gap-3 py-2">
+                                    <div className="flex-1 h-px" style={{ background: 'rgba(99,102,241,0.15)' }} />
+                                    <span className="text-xs px-3 py-1 rounded-full shrink-0"
+                                        style={{ background: '#0F0F1A', border: '1px solid rgba(99,102,241,0.2)', color: '#6366F1' }}>
+                                        {msg.contextLabel}
+                                    </span>
+                                    <div className="flex-1 h-px" style={{ background: 'rgba(99,102,241,0.15)' }} />
                                 </div>
+                            )
+                        }
 
-                                {msg.role === 'assistant' && (msg.agents || msg.tokens || msg.sources || msg.webSources) && (
-                                    <div className="flex items-center flex-wrap gap-2 mt-2 pl-1">
-                                        {msg.agents?.map((a) => (
-                                            <span key={a} className="text-xs px-2 py-0.5 rounded-full text-indigo-400"
-                                                style={{ background: 'rgba(99,102,241,0.08)', border: '1px solid rgba(99,102,241,0.15)' }}>
-                                                {a}
+                        return (
+                            <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                <div className="max-w-xl w-full">
+                                    {msg.role === 'assistant' && (
+                                        <div className="flex items-center gap-2 mb-2">
+                                            <div className="w-5 h-5 rounded-md flex items-center justify-center"
+                                                style={{ background: 'rgba(99,102,241,0.2)' }}>
+                                                <Brain size={10} className="text-indigo-400" />
+                                            </div>
+                                            <span className="text-gray-600 text-xs">AgentForge</span>
+                                            {msg.confidence && (
+                                                <span className="text-xs px-2 py-0.5 rounded-full font-medium"
+                                                    style={{
+                                                        background: msg.confidence >= 90 ? 'rgba(16,185,129,0.1)' : 'rgba(245,158,11,0.1)',
+                                                        color: msg.confidence >= 90 ? '#10B981' : '#F59E0B'
+                                                    }}>
+                                                    {msg.confidence}% confident
+                                                </span>
+                                            )}
+                                            {msg.mode && (
+                                                <span className="text-xs px-2 py-0.5 rounded-full"
+                                                    style={{
+                                                        background: msg.mode === 'web' ? 'rgba(16,185,129,0.08)' :
+                                                            msg.mode === 'hybrid' ? 'rgba(245,158,11,0.08)' :
+                                                                'rgba(99,102,241,0.08)',
+                                                        color: msg.mode === 'web' ? '#10B981' :
+                                                            msg.mode === 'hybrid' ? '#F59E0B' : '#818CF8'
+                                                    }}>
+                                                    {msg.mode === 'web' ? '🌐 web' : msg.mode === 'hybrid' ? '🔀 hybrid' : '📄 docs'}
+                                                </span>
+                                            )}
+                                        </div>
+                                    )}
+
+                                    {msg.role === 'user' && msg.sources && (
+                                        <div className="flex justify-end mb-1">
+                                            <span className="text-xs text-indigo-400 px-2 py-0.5 rounded-full"
+                                                style={{ background: 'rgba(99,102,241,0.1)' }}>
+                                                🎯 {msg.sources.join(', ')}
                                             </span>
-                                        ))}
-                                        {msg.sources?.map((s) => (
-                                            <span key={s} className="text-xs px-2 py-0.5 rounded-full text-emerald-400"
-                                                style={{ background: 'rgba(16,185,129,0.08)', border: '1px solid rgba(16,185,129,0.15)' }}>
-                                                📄 {s}
-                                            </span>
-                                        ))}
-                                        {msg.webSources?.slice(0, 2).map((s: string) => {
-                                            try {
-                                                return (
-                                                    <a key={s} href={s} target="_blank" rel="noopener noreferrer"
-                                                        className="text-xs px-2 py-0.5 rounded-full text-blue-400 hover:text-blue-300"
-                                                        style={{ background: 'rgba(59,130,246,0.08)', border: '1px solid rgba(59,130,246,0.15)' }}>
-                                                        🌐 {new URL(s).hostname}
-                                                    </a>
-                                                )
-                                            } catch { return null }
-                                        })}
-                                        {msg.tokens && <span className="text-gray-700 text-xs">{msg.tokens} tokens</span>}
+                                        </div>
+                                    )}
+
+                                    <div className={`px-4 py-3 rounded-2xl text-sm leading-relaxed ${msg.role === 'user' ? 'ml-auto rounded-tr-sm' : 'rounded-tl-sm'}`}
+                                        style={msg.role === 'user' ? {
+                                            background: 'linear-gradient(135deg, #6366F1, #8B5CF6)',
+                                            color: 'white',
+                                            maxWidth: 'fit-content'
+                                        } : {
+                                            background: '#0F0F1A',
+                                            border: '1px solid rgba(99,102,241,0.15)',
+                                            color: '#E2E8F0'
+                                        }}>
+                                        <div className="space-y-0.5">
+                                            {renderMessageContent(msg.content)}
+                                        </div>
                                     </div>
-                                )}
+
+                                    {msg.role === 'assistant' && (msg.agents || msg.tokens || msg.sources || msg.webSources) && (
+                                        <div className="flex items-center flex-wrap gap-2 mt-2 pl-1">
+                                            {msg.agents?.map((a) => (
+                                                <span key={a} className="text-xs px-2 py-0.5 rounded-full text-indigo-400"
+                                                    style={{ background: 'rgba(99,102,241,0.08)', border: '1px solid rgba(99,102,241,0.15)' }}>
+                                                    {a}
+                                                </span>
+                                            ))}
+                                            {msg.sources?.map((s) => (
+                                                <span key={s} className="text-xs px-2 py-0.5 rounded-full text-emerald-400"
+                                                    style={{ background: 'rgba(16,185,129,0.08)', border: '1px solid rgba(16,185,129,0.15)' }}>
+                                                    📄 {s}
+                                                </span>
+                                            ))}
+                                            {msg.webSources?.slice(0, 2).map((s: string) => {
+                                                try {
+                                                    return (
+                                                        <a key={s} href={s} target="_blank" rel="noopener noreferrer"
+                                                            className="text-xs px-2 py-0.5 rounded-full text-blue-400 hover:text-blue-300"
+                                                            style={{ background: 'rgba(59,130,246,0.08)', border: '1px solid rgba(59,130,246,0.15)' }}>
+                                                            🌐 {new URL(s).hostname}
+                                                        </a>
+                                                    )
+                                                } catch { return null }
+                                            })}
+                                            {msg.tokens && <span className="text-gray-700 text-xs">{msg.tokens} tokens</span>}
+                                        </div>
+                                    )}
+                                </div>
                             </div>
-                        </div>
-                    ))}
+                        )
+                    })}
 
                     {loading && (
                         <div className="flex justify-start">
@@ -518,7 +611,7 @@ export default function ProjectPage() {
                                 { id: 'web', label: '🌐 Web Only' },
                                 { id: 'hybrid', label: '🔀 Both' }
                             ].map((m) => (
-                                <button key={m.id} onClick={() => setSearchMode(m.id as any)}
+                                <button key={m.id} onClick={() => handleModeChange(m.id as any)}
                                     className="px-3 py-1.5 rounded-lg text-xs font-medium transition-all"
                                     style={searchMode === m.id ? {
                                         background: m.id === 'web' ? 'rgba(16,185,129,0.2)' :
@@ -540,7 +633,10 @@ export default function ProjectPage() {
                         <div className="mb-2 flex items-center gap-2 text-xs text-indigo-400">
                             <span>🎯 Filtering:</span>
                             <span className="truncate flex-1">{getSelectedDocNames()}</span>
-                            <button onClick={() => setSelectedDocs([])} className="text-gray-600 hover:text-white shrink-0">✕</button>
+                            <button onClick={() => {
+                                setSelectedDocs([])
+                                if (messages.length > 0) addContextDivider('📄 All documents')
+                            }} className="text-gray-600 hover:text-white shrink-0">✕</button>
                         </div>
                     )}
 
@@ -567,7 +663,7 @@ export default function ProjectPage() {
                         </button>
                     </div>
                     <p className="text-gray-700 text-xs mt-2 text-center">
-                        Enter to send · Shift+Enter for new line · Check sources on left to filter
+                        Enter to send · Shift+Enter for new line · Select sources on left to filter
                     </p>
                 </div>
             </div>
