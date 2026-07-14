@@ -247,3 +247,121 @@ Source: {file.filename} (image)"""
         if os.path.exists(image_path):
             os.remove(image_path)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{project_id}/transcribe-audio")
+async def transcribe_audio_endpoint(
+    project_id: str,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    from app.agents.audio_agent import transcribe_audio
+    from app.rag.chunker import chunk_text
+    from app.rag.retriever import add_chunks_to_collection
+
+    project = db.query(Project).filter(
+        Project.id == project_id,
+        Project.owner_id == current_user.id
+    ).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    ext = file.filename.split(".")[-1].lower()
+    if ext not in ["mp3", "wav", "m4a", "ogg", "flac", "webm"]:
+        raise HTTPException(status_code=400, detail="Unsupported audio format")
+
+    audio_id = str(uuid.uuid4())
+    audio_path = f"{UPLOAD_DIR}/{audio_id}_{file.filename}"
+
+    contents = await file.read()
+    with open(audio_path, "wb") as f:
+        f.write(contents)
+
+    try:
+        result = transcribe_audio(audio_path)
+
+        transcript_text = f"AUDIO TRANSCRIPT: {file.filename}\n\n"
+        transcript_text += f"Duration: {result['duration']:.1f}s\n\n"
+        transcript_text += "FULL TRANSCRIPT:\n"
+        transcript_text += result["text"] + "\n\n"
+        transcript_text += "TIMESTAMPED SEGMENTS:\n"
+        for seg in result["segments"]:
+            transcript_text += f"[{seg['start']:.1f}s - {seg['end']:.1f}s] {seg['text']}\n"
+
+        doc_id = str(uuid.uuid4())
+        chunks = chunk_text(transcript_text, f"[AUDIO] {file.filename}")
+        count = add_chunks_to_collection(
+            project.chroma_collection,
+            chunks,
+            doc_id
+        )
+
+        doc = Document(
+            id=doc_id,
+            project_id=project_id,
+            user_id=current_user.id,
+            filename=f"[AUDIO] {file.filename}",
+            file_type=DocumentType("txt"),
+            file_size=len(contents),
+            local_path=audio_path,
+            status=DocumentStatus.completed,
+            chunk_count=count,
+            embedding_count=count
+        )
+        db.add(doc)
+        db.commit()
+
+        return {
+            "text": result["text"],
+            "segments": result["segments"][:10],
+            "duration": result["duration"],
+            "chunk_count": result["chunk_count"],
+            "stored_chunks": count,
+            "filename": file.filename,
+            "stored_in_knowledge_base": True
+        }
+
+    except Exception as e:
+        if os.path.exists(audio_path):
+            os.remove(audio_path)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{project_id}/transcribe-voice")
+async def transcribe_voice_endpoint(
+    project_id: str,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    from app.agents.audio_agent import transcribe_audio
+
+    project = db.query(Project).filter(
+        Project.id == project_id,
+        Project.owner_id == current_user.id
+    ).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    voice_id = str(uuid.uuid4())
+    voice_path = f"{UPLOAD_DIR}/{voice_id}_voice.webm"
+
+    contents = await file.read()
+    with open(voice_path, "wb") as f:
+        f.write(contents)
+
+    try:
+        result = transcribe_audio(voice_path)
+        return {
+            "text": result["text"],
+            "duration": result["duration"]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        try:
+            if os.path.exists(voice_path):
+                os.remove(voice_path)
+        except Exception:
+            pass

@@ -1,10 +1,10 @@
 import { useState, useRef, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, FolderOpen, Send, Upload, FileText, ImageIcon, Trash2, Loader, Brain } from 'lucide-react'
+import { ArrowLeft, FolderOpen, Send, Upload, FileText, ImageIcon, Trash2, Loader, Brain, Mic, MicOff, Music } from 'lucide-react'
 import Sidebar from '../components/Sidebar'
 import { getProjects } from '../api/projects'
-import { getDocuments, deleteDocument, uploadDocument, processDocument } from '../api/knowledge'
+import { getDocuments, deleteDocument, uploadDocument, processDocument, transcribeAudio, transcribeVoice } from '../api/knowledge'
 import { smartSearch } from '../api/search'
 import client from '../api/client'
 
@@ -17,7 +17,7 @@ interface Message {
     agents?: string[]
     tokens?: number
     confidence?: number
-    type?: 'text' | 'image' | 'context-change'
+    type?: 'text' | 'image' | 'audio' | 'context-change'
     mode?: string
     contextLabel?: string
 }
@@ -35,9 +35,16 @@ export default function ProjectPage() {
     const [selectedDocs, setSelectedDocs] = useState<string[]>([])
     const [searchMode, setSearchMode] = useState<'docs' | 'web' | 'hybrid'>('docs')
     const [lastContext, setLastContext] = useState<string>('all')
+    const [isRecording, setIsRecording] = useState(false)
+    const [recordingSeconds, setRecordingSeconds] = useState(0)
+
     const fileRef = useRef<HTMLInputElement>(null)
     const imageRef = useRef<HTMLInputElement>(null)
+    const audioRef = useRef<HTMLInputElement>(null)
     const bottomRef = useRef<HTMLDivElement>(null)
+    const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+    const audioChunksRef = useRef<Blob[]>([])
+    const recordingTimerRef = useRef<any>(null)
 
     const { data: projects = [] } = useQuery({ queryKey: ['projects'], queryFn: getProjects })
     const { data: documents = [] } = useQuery({
@@ -81,13 +88,10 @@ export default function ProjectPage() {
         const newSelected = selectedDocs.includes(docId)
             ? selectedDocs.filter(d => d !== docId)
             : [...selectedDocs, docId]
-
         setSelectedDocs(newSelected)
-
         const newLabel = newSelected.length === 0
-            ? `📄 All documents`
-            : `📄 ${newSelected.map(sid => completedDocs.find((d: any) => d.id === sid)?.filename?.replace('[IMAGE] ', '') || sid).join(', ')}`
-
+            ? '📄 All documents'
+            : `📄 ${newSelected.map(sid => completedDocs.find((d: any) => d.id === sid)?.filename?.replace('[IMAGE] ', '').replace('[AUDIO] ', '') || sid).join(', ')}`
         const newKey = newSelected.sort().join(',') || 'all'
         if (newKey !== lastContext.split('-')[0] && messages.length > 0) {
             addContextDivider(newLabel)
@@ -98,11 +102,9 @@ export default function ProjectPage() {
     const handleModeChange = (newMode: 'docs' | 'web' | 'hybrid') => {
         if (newMode === searchMode) return
         setSearchMode(newMode)
-
         if (messages.length > 0) {
             const label = newMode === 'web' ? '🌐 Web search only' :
-                newMode === 'hybrid' ? '🔀 Documents + Web' :
-                    '📄 Documents only'
+                newMode === 'hybrid' ? '🔀 Documents + Web' : '📄 Documents only'
             addContextDivider(label)
         }
     }
@@ -110,7 +112,7 @@ export default function ProjectPage() {
     const getSelectedDocNames = () => {
         if (selectedDocs.length === 0) return 'All documents'
         return selectedDocs
-            .map(sid => completedDocs.find((d: any) => d.id === sid)?.filename?.replace('[IMAGE] ', '') || sid)
+            .map(sid => completedDocs.find((d: any) => d.id === sid)?.filename?.replace('[IMAGE] ', '').replace('[AUDIO] ', '') || sid)
             .join(', ')
     }
 
@@ -128,7 +130,6 @@ export default function ProjectPage() {
             const doc = await uploadDocument(id!, file)
             await processDocument(id!, doc.id)
             queryClient.invalidateQueries({ queryKey: ['documents', id] })
-
             setLoading(true)
             try {
                 const result = await smartSearch(
@@ -149,17 +150,40 @@ export default function ProjectPage() {
                 setMessages(prev => [...prev, {
                     id: (Date.now() + 1).toString(),
                     role: 'assistant',
-                    content: `📄 **${file.name}** uploaded and ready. Ask me anything about it.`
+                    content: `📄 **${file.name}** uploaded and ready.`
                 }])
             } finally {
                 setLoading(false)
             }
         } catch (err) {
             console.error(err)
+        } finally {
+            setUploading(false)
+        }
+    }
+
+    const handleAudioUpload = async (file: File) => {
+        setUploading(true)
+        setMessages(prev => [...prev, {
+            id: Date.now().toString(),
+            role: 'assistant',
+            content: `🎵 Transcribing **${file.name}**... This may take a while for long files.`,
+            type: 'audio'
+        }])
+        try {
+            const result = await transcribeAudio(id!, file)
+            queryClient.invalidateQueries({ queryKey: ['documents', id] })
             setMessages(prev => [...prev, {
-                id: Date.now().toString(),
+                id: (Date.now() + 1).toString(),
                 role: 'assistant',
-                content: `Failed to upload document. Please try again.`
+                content: `✅ **${file.name}** transcribed!\n\n**Duration:** ${result.duration?.toFixed(1)}s · **Chunks:** ${result.chunk_count}\n\n**Preview:**\n${result.text?.slice(0, 300)}${result.text?.length > 300 ? '...' : ''}\n\n*Full transcript stored in knowledge base. Ask questions about it!*`,
+                type: 'audio'
+            }])
+        } catch (err: any) {
+            setMessages(prev => [...prev, {
+                id: (Date.now() + 1).toString(),
+                role: 'assistant',
+                content: `Failed to transcribe audio: ${err.response?.data?.detail || 'Unknown error'}`
             }])
         } finally {
             setUploading(false)
@@ -188,7 +212,7 @@ export default function ProjectPage() {
             setMessages(prev => [...prev, {
                 id: (Date.now() + 1).toString(),
                 role: 'assistant',
-                content: `🖼️ **${file.name}** analyzed and stored in knowledge base.\n\n${res.data.answer}\n\n*You can now ask follow-up questions about this image.*`,
+                content: `🖼️ **${file.name}** analyzed and stored.\n\n${res.data.answer}\n\n*Ask follow-up questions anytime.*`,
                 confidence: res.data.confidence_score,
                 tokens: res.data.tokens_used,
                 type: 'image'
@@ -204,29 +228,72 @@ export default function ProjectPage() {
         }
     }
 
+    const startRecording = async () => {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+            const mediaRecorder = new MediaRecorder(stream)
+            mediaRecorderRef.current = mediaRecorder
+            audioChunksRef.current = []
+
+            mediaRecorder.ondataavailable = (e) => {
+                if (e.data.size > 0) audioChunksRef.current.push(e.data)
+            }
+
+            mediaRecorder.onstop = async () => {
+                stream.getTracks().forEach(t => t.stop())
+                const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' })
+                setLoading(true)
+                try {
+                    const result = await transcribeVoice(id!, audioBlob)
+                    if (result.text) {
+                        setInput(result.text)
+                    }
+                } catch (err) {
+                    console.error('Voice transcription failed:', err)
+                } finally {
+                    setLoading(false)
+                }
+            }
+
+            mediaRecorder.start()
+            setIsRecording(true)
+            setRecordingSeconds(0)
+            recordingTimerRef.current = setInterval(() => {
+                setRecordingSeconds(s => s + 1)
+            }, 1000)
+        } catch (err) {
+            alert('Microphone access denied. Please allow microphone access.')
+        }
+    }
+
+    const stopRecording = () => {
+        if (mediaRecorderRef.current && isRecording) {
+            mediaRecorderRef.current.stop()
+            setIsRecording(false)
+            clearInterval(recordingTimerRef.current)
+            setRecordingSeconds(0)
+        }
+    }
+
     const handleSend = async () => {
         if (!input.trim() || loading) return
-
-        // Check if context changed since last message
         const currentContextKey = getContextKey()
         if (messages.length > 0 && currentContextKey !== lastContext) {
             addContextDivider(getContextLabel())
             setLastContext(currentContextKey)
         }
-
         const userMessage: Message = {
             id: Date.now().toString(),
             role: 'user',
             content: input,
             sources: selectedDocs.length > 0
-                ? selectedDocs.map(sid => completedDocs.find((d: any) => d.id === sid)?.filename?.replace('[IMAGE] ', '') || sid)
+                ? selectedDocs.map(sid => completedDocs.find((d: any) => d.id === sid)?.filename?.replace('[IMAGE] ', '').replace('[AUDIO] ', '') || sid)
                 : undefined
         }
         setMessages(prev => [...prev, userMessage])
         const currentInput = buildFilteredQuery(input)
         setInput('')
         setLoading(true)
-
         try {
             const result = await smartSearch(id!, currentInput, searchMode)
             setMessages(prev => [...prev, {
@@ -241,10 +308,7 @@ export default function ProjectPage() {
                         ['ResearchAgent', 'WebAgent'],
                 mode: result.mode
             }])
-
-            if (messages.length === 0) {
-                setLastContext(currentContextKey)
-            }
+            if (messages.length === 0) setLastContext(currentContextKey)
         } catch (err: any) {
             setMessages(prev => [...prev, {
                 id: (Date.now() + 1).toString(),
@@ -278,7 +342,6 @@ export default function ProjectPage() {
 
             {/* Left panel */}
             <div className="ml-64 w-72 flex flex-col border-r" style={{ borderColor: 'rgba(99,102,241,0.1)', background: '#0A0A0F' }}>
-
                 <div className="p-4 border-b" style={{ borderColor: 'rgba(99,102,241,0.1)' }}>
                     <button onClick={() => navigate('/dashboard')}
                         className="flex items-center gap-2 text-gray-500 hover:text-white text-sm mb-3 transition-all">
@@ -306,6 +369,9 @@ export default function ProjectPage() {
                     <input ref={imageRef} type="file" className="hidden"
                         accept=".jpg,.jpeg,.png,.gif,.webp"
                         onChange={(e) => { if (e.target.files?.[0]) handleImageUpload(e.target.files[0]) }} />
+                    <input ref={audioRef} type="file" className="hidden"
+                        accept=".mp3,.wav,.m4a,.ogg,.flac"
+                        onChange={(e) => { if (e.target.files?.[0]) handleAudioUpload(e.target.files[0]) }} />
 
                     <button onClick={() => fileRef.current?.click()} disabled={uploading}
                         className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-sm transition-all disabled:opacity-40"
@@ -317,8 +383,7 @@ export default function ProjectPage() {
                     <button onClick={() => setShowImageInput(!showImageInput)}
                         className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-sm transition-all"
                         style={{ background: 'rgba(139,92,246,0.08)', border: '1px solid rgba(139,92,246,0.2)', color: '#A78BFA' }}>
-                        <ImageIcon size={14} />
-                        Analyze Image
+                        <ImageIcon size={14} /> Analyze Image
                     </button>
 
                     {showImageInput && (
@@ -334,22 +399,21 @@ export default function ProjectPage() {
                             </button>
                         </div>
                     )}
+
+                    <button onClick={() => audioRef.current?.click()} disabled={uploading}
+                        className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-sm transition-all disabled:opacity-40"
+                        style={{ background: 'rgba(16,185,129,0.08)', border: '1px solid rgba(16,185,129,0.2)', color: '#10B981' }}>
+                        <Music size={14} /> Transcribe Audio
+                    </button>
                 </div>
 
                 {/* Document list */}
                 <div className="flex-1 overflow-y-auto p-4">
                     <div className="flex items-center justify-between mb-3">
-                        <p className="text-xs text-gray-600 uppercase tracking-wide">
-                            Sources ({completedDocs.length})
-                        </p>
+                        <p className="text-xs text-gray-600 uppercase tracking-wide">Sources ({completedDocs.length})</p>
                         {selectedDocs.length > 0 && (
-                            <button onClick={() => {
-                                setSelectedDocs([])
-                                if (messages.length > 0) addContextDivider('📄 All documents')
-                            }}
-                                className="text-xs text-indigo-400 hover:text-indigo-300">
-                                Clear
-                            </button>
+                            <button onClick={() => { setSelectedDocs([]); if (messages.length > 0) addContextDivider('📄 All documents') }}
+                                className="text-xs text-indigo-400 hover:text-indigo-300">Clear</button>
                         )}
                     </div>
 
@@ -363,8 +427,7 @@ export default function ProjectPage() {
                     {uploading && (
                         <div className="mb-3 p-2 rounded-lg text-xs text-emerald-300 flex items-center gap-2"
                             style={{ background: 'rgba(16,185,129,0.08)', border: '1px solid rgba(16,185,129,0.2)' }}>
-                            <Loader size={10} className="animate-spin" />
-                            Processing document...
+                            <Loader size={10} className="animate-spin" /> Processing...
                         </div>
                     )}
 
@@ -378,9 +441,10 @@ export default function ProjectPage() {
                         <div className="space-y-2">
                             {completedDocs.map((doc: any) => {
                                 const isSelected = selectedDocs.includes(doc.id)
+                                const isImage = doc.filename.startsWith('[IMAGE]')
+                                const isAudio = doc.filename.startsWith('[AUDIO]')
                                 return (
-                                    <div key={doc.id}
-                                        onClick={() => toggleDocSelection(doc.id)}
+                                    <div key={doc.id} onClick={() => toggleDocSelection(doc.id)}
                                         className="flex items-start gap-2 p-2 rounded-lg group transition-all cursor-pointer"
                                         style={{
                                             border: `1px solid ${isSelected ? 'rgba(99,102,241,0.4)' : 'rgba(255,255,255,0.04)'}`,
@@ -398,14 +462,14 @@ export default function ProjectPage() {
                                             )}
                                         </div>
                                         <div className="w-5 h-5 rounded flex items-center justify-center shrink-0 mt-0.5"
-                                            style={{ background: doc.filename.startsWith('[IMAGE]') ? 'rgba(139,92,246,0.15)' : 'rgba(99,102,241,0.15)' }}>
-                                            {doc.filename.startsWith('[IMAGE]')
-                                                ? <ImageIcon size={9} className="text-purple-400" />
-                                                : <FileText size={9} className="text-indigo-400" />}
+                                            style={{ background: isImage ? 'rgba(139,92,246,0.15)' : isAudio ? 'rgba(16,185,129,0.15)' : 'rgba(99,102,241,0.15)' }}>
+                                            {isImage ? <ImageIcon size={9} className="text-purple-400" /> :
+                                                isAudio ? <Music size={9} className="text-emerald-400" /> :
+                                                    <FileText size={9} className="text-indigo-400" />}
                                         </div>
                                         <div className="flex-1 min-w-0">
                                             <p className={`text-xs truncate ${isSelected ? 'text-white' : 'text-gray-400'}`}>
-                                                {doc.filename.replace('[IMAGE] ', '')}
+                                                {doc.filename.replace('[IMAGE] ', '').replace('[AUDIO] ', '')}
                                             </p>
                                             <p className="text-gray-600 text-xs">{doc.chunk_count} chunks</p>
                                         </div>
@@ -423,8 +487,6 @@ export default function ProjectPage() {
 
             {/* Right panel — chat */}
             <div className="flex-1 flex flex-col">
-
-                {/* Chat header */}
                 <div className="px-6 py-4 border-b flex items-center justify-between"
                     style={{ borderColor: 'rgba(99,102,241,0.1)', background: '#0A0A0F' }}>
                     <div className="flex items-center gap-3">
@@ -438,11 +500,7 @@ export default function ProjectPage() {
                         </div>
                     </div>
                     {messages.length > 0 && (
-                        <button
-                            onClick={() => {
-                                setMessages([])
-                                setLastContext('all')
-                            }}
+                        <button onClick={() => { setMessages([]); setLastContext('all') }}
                             className="text-xs text-gray-600 hover:text-gray-400 px-3 py-1.5 rounded-lg transition-all"
                             style={{ border: '1px solid rgba(255,255,255,0.06)' }}>
                             Clear chat
@@ -460,7 +518,7 @@ export default function ProjectPage() {
                             </div>
                             <h3 className="text-white font-semibold mb-2">Start a conversation</h3>
                             <p className="text-gray-600 text-sm max-w-sm">
-                                Upload documents on the left, select which ones to search, choose a mode, then ask questions.
+                                Upload documents, images, or audio on the left. Then type or speak your question.
                             </p>
                             <div className="mt-6 space-y-2 w-full max-w-sm">
                                 {[
@@ -479,7 +537,6 @@ export default function ProjectPage() {
                     )}
 
                     {messages.map((msg) => {
-                        // Context divider
                         if (msg.role === 'divider') {
                             return (
                                 <div key={msg.id} className="flex items-center gap-3 py-2">
@@ -516,10 +573,8 @@ export default function ProjectPage() {
                                                 <span className="text-xs px-2 py-0.5 rounded-full"
                                                     style={{
                                                         background: msg.mode === 'web' ? 'rgba(16,185,129,0.08)' :
-                                                            msg.mode === 'hybrid' ? 'rgba(245,158,11,0.08)' :
-                                                                'rgba(99,102,241,0.08)',
-                                                        color: msg.mode === 'web' ? '#10B981' :
-                                                            msg.mode === 'hybrid' ? '#F59E0B' : '#818CF8'
+                                                            msg.mode === 'hybrid' ? 'rgba(245,158,11,0.08)' : 'rgba(99,102,241,0.08)',
+                                                        color: msg.mode === 'web' ? '#10B981' : msg.mode === 'hybrid' ? '#F59E0B' : '#818CF8'
                                                     }}>
                                                     {msg.mode === 'web' ? '🌐 web' : msg.mode === 'hybrid' ? '🔀 hybrid' : '📄 docs'}
                                                 </span>
@@ -601,7 +656,6 @@ export default function ProjectPage() {
 
                 {/* Input */}
                 <div className="px-6 py-4 border-t" style={{ borderColor: 'rgba(99,102,241,0.1)', background: '#0A0A0F' }}>
-
                     {/* Mode toggle */}
                     <div className="mb-3 flex items-center gap-2">
                         <span className="text-gray-600 text-xs shrink-0">Search:</span>
@@ -615,13 +669,10 @@ export default function ProjectPage() {
                                     className="px-3 py-1.5 rounded-lg text-xs font-medium transition-all"
                                     style={searchMode === m.id ? {
                                         background: m.id === 'web' ? 'rgba(16,185,129,0.2)' :
-                                            m.id === 'hybrid' ? 'rgba(245,158,11,0.2)' :
-                                                'rgba(99,102,241,0.2)',
-                                        color: m.id === 'web' ? '#10B981' :
-                                            m.id === 'hybrid' ? '#F59E0B' : '#818CF8',
+                                            m.id === 'hybrid' ? 'rgba(245,158,11,0.2)' : 'rgba(99,102,241,0.2)',
+                                        color: m.id === 'web' ? '#10B981' : m.id === 'hybrid' ? '#F59E0B' : '#818CF8',
                                         border: `1px solid ${m.id === 'web' ? 'rgba(16,185,129,0.3)' :
-                                            m.id === 'hybrid' ? 'rgba(245,158,11,0.3)' :
-                                                'rgba(99,102,241,0.3)'}`
+                                            m.id === 'hybrid' ? 'rgba(245,158,11,0.3)' : 'rgba(99,102,241,0.3)'}`
                                     } : { color: '#6B7280', border: '1px solid transparent' }}>
                                     {m.label}
                                 </button>
@@ -633,37 +684,63 @@ export default function ProjectPage() {
                         <div className="mb-2 flex items-center gap-2 text-xs text-indigo-400">
                             <span>🎯 Filtering:</span>
                             <span className="truncate flex-1">{getSelectedDocNames()}</span>
-                            <button onClick={() => {
-                                setSelectedDocs([])
-                                if (messages.length > 0) addContextDivider('📄 All documents')
-                            }} className="text-gray-600 hover:text-white shrink-0">✕</button>
+                            <button onClick={() => { setSelectedDocs([]); if (messages.length > 0) addContextDivider('📄 All documents') }}
+                                className="text-gray-600 hover:text-white shrink-0">✕</button>
                         </div>
                     )}
 
-                    <div className="flex items-end gap-3 p-3 rounded-2xl"
+                    {/* Recording indicator */}
+                    {isRecording && (
+                        <div className="mb-2 flex items-center gap-2 px-3 py-2 rounded-xl"
+                            style={{ background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.3)' }}>
+                            <div className="w-2 h-2 rounded-full bg-red-400 animate-pulse" />
+                            <span className="text-red-400 text-xs font-medium">Recording... {recordingSeconds}s</span>
+                            <span className="text-gray-600 text-xs ml-auto">Click mic to stop</span>
+                        </div>
+                    )}
+
+                    <div className="flex items-end gap-2 p-3 rounded-2xl"
                         style={{ background: '#0F0F1A', border: '1px solid rgba(99,102,241,0.2)' }}>
                         <textarea
                             value={input}
                             onChange={(e) => setInput(e.target.value)}
                             onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() } }}
                             placeholder={
-                                searchMode === 'web' ? 'Search the internet...' :
-                                    searchMode === 'hybrid' ? 'Search docs + internet...' :
-                                        selectedDocs.length > 0 ? `Ask about ${getSelectedDocNames()}...` :
-                                            'Ask anything about your documents...'
+                                isRecording ? 'Recording...' :
+                                    searchMode === 'web' ? 'Search the internet...' :
+                                        searchMode === 'hybrid' ? 'Search docs + internet...' :
+                                            selectedDocs.length > 0 ? `Ask about ${getSelectedDocNames()}...` :
+                                                'Ask anything... or click 🎤 to speak'
                             }
                             rows={1}
-                            className="flex-1 bg-transparent text-white text-sm placeholder-gray-600 focus:outline-none resize-none"
+                            disabled={isRecording}
+                            className="flex-1 bg-transparent text-white text-sm placeholder-gray-600 focus:outline-none resize-none disabled:opacity-50"
                             style={{ maxHeight: '120px' }}
                         />
-                        <button onClick={handleSend} disabled={loading || !input.trim()}
+
+                        {/* Mic button */}
+                        <button
+                            onClick={isRecording ? stopRecording : startRecording}
+                            disabled={loading}
+                            className="w-8 h-8 rounded-xl flex items-center justify-center transition-all disabled:opacity-30 shrink-0"
+                            style={{
+                                background: isRecording ? 'rgba(239,68,68,0.2)' : 'rgba(99,102,241,0.15)',
+                                border: `1px solid ${isRecording ? 'rgba(239,68,68,0.4)' : 'rgba(99,102,241,0.3)'}`
+                            }}>
+                            {isRecording
+                                ? <MicOff size={14} className="text-red-400" />
+                                : <Mic size={14} className="text-indigo-400" />}
+                        </button>
+
+                        {/* Send button */}
+                        <button onClick={handleSend} disabled={loading || !input.trim() || isRecording}
                             className="w-8 h-8 rounded-xl flex items-center justify-center transition-all disabled:opacity-30 shrink-0"
                             style={{ background: 'linear-gradient(135deg, #6366F1, #8B5CF6)' }}>
                             <Send size={14} className="text-white" />
                         </button>
                     </div>
                     <p className="text-gray-700 text-xs mt-2 text-center">
-                        Enter to send · Shift+Enter for new line · Select sources on left to filter
+                        Enter to send · 🎤 for voice · Select sources on left to filter
                     </p>
                 </div>
             </div>
