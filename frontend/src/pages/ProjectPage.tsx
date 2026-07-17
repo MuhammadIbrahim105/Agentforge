@@ -20,6 +20,7 @@ interface Message {
     type?: 'text' | 'image' | 'audio' | 'context-change'
     mode?: string
     contextLabel?: string
+    imageUrl?: string
 }
 
 export default function ProjectPage() {
@@ -193,10 +194,12 @@ export default function ProjectPage() {
     const handleImageUpload = async (file: File) => {
         setLoading(true)
         const question = imageQuestion || 'Describe this image in detail. Extract ALL text, numbers, data, and information visible.'
+        const imagePreviewUrl = URL.createObjectURL(file)
         setMessages(prev => [...prev, {
             id: Date.now().toString(),
             role: 'user',
-            content: `📷 **${file.name}**\n${question}`
+            content: `📷 **${file.name}**\n${question}`,
+            imageUrl: imagePreviewUrl
         }])
         setImageQuestion('')
         setShowImageInput(false)
@@ -602,6 +605,16 @@ export default function ProjectPage() {
                                             color: '#E2E8F0'
                                         }}>
                                         <div className="space-y-0.5">
+                                            {msg.imageUrl && (
+                                                <div className="mb-3">
+                                                    <a href={msg.imageUrl} target="_blank" rel="noopener noreferrer">
+                                                        <img src={msg.imageUrl} alt="uploaded"
+                                                            className="max-h-48 rounded-xl object-contain cursor-pointer hover:opacity-80 transition-all"
+                                                            style={{ border: '1px solid rgba(139,92,246,0.3)' }} />
+                                                        <p className="text-xs mt-1 text-purple-400 opacity-70">Click to view full size</p>
+                                                    </a>
+                                                </div>
+                                            )}
                                             {renderMessageContent(msg.content)}
                                         </div>
                                     </div>
